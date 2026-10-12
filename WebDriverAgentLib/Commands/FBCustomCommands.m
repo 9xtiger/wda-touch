@@ -49,7 +49,12 @@ static void (*fbIOHIDEventSetIntegerValue)(FBIOHIDEventRef, uint32_t, CFIndex);
 static void (*fbIOHIDEventAppendEvent)(FBIOHIDEventRef, FBIOHIDEventRef, CFOptionFlags);
 static FBIOHIDEventSystemClientRef (*fbIOHIDEventSystemClientCreate)(CFAllocatorRef);
 static void (*fbIOHIDEventSystemClientDispatchEvent)(FBIOHIDEventSystemClientRef, FBIOHIDEventRef);
+static void (*fbBKSHIDEventSetDigitizerInfo)(FBIOHIDEventRef, uint32_t, uint8_t, uint8_t, CFStringRef, CFTimeInterval, float);
 static FBIOHIDEventSystemClientRef fbHidClient = NULL;
+
+@interface UIWindow (FBLiveTouchPrivate)
+- (uint32_t)_contextId;
+@end
 
 static const uint32_t kFBDigitizerFieldIsDisplayIntegrated = 0x000B0019;
 static const uint32_t kFBDigitizerEventRange = 0x00000001;
@@ -71,6 +76,10 @@ static void FBEnsureHIDClient(void)
     fbIOHIDEventAppendEvent = (void *)dlsym(handle, "IOHIDEventAppendEvent");
     fbIOHIDEventSystemClientCreate = (void *)dlsym(handle, "IOHIDEventSystemClientCreate");
     fbIOHIDEventSystemClientDispatchEvent = (void *)dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
+    void *bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
+    if (NULL != bks) {
+      fbBKSHIDEventSetDigitizerInfo = (void *)dlsym(bks, "BKSHIDEventSetDigitizerInfo");
+    }
     if (NULL != fbIOHIDEventSystemClientCreate) {
       fbHidClient = fbIOHIDEventSystemClientCreate(kCFAllocatorDefault);
     }
@@ -113,6 +122,18 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
       fbIOHIDEventAppendEvent(hand, finger, 0);
     }
     CFRelease(finger);
+  }
+  // Gan event voi display context (BackBoardServices) — THIEU buoc nay event
+  // bi he thong bo qua (theo WebKit HIDEventGenerator — ho drive device that).
+  if (NULL != fbBKSHIDEventSetDigitizerInfo) {
+    UIWindow *w = UIApplication.sharedApplication.keyWindow;
+    if (nil == w) {
+      w = UIApplication.sharedApplication.windows.firstObject;
+    }
+    uint32_t ctx = nil == w ? 0 : w._contextId;
+    if (ctx > 0) {
+      fbBKSHIDEventSetDigitizerInfo(hand, ctx, 0, 0, NULL, 0, 0);
+    }
   }
   fbIOHIDEventSystemClientDispatchEvent(fbHidClient, hand);
   CFRelease(hand);
