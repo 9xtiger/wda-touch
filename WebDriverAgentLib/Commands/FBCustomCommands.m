@@ -50,7 +50,11 @@ static void (*fbIOHIDEventAppendEvent)(FBIOHIDEventRef, FBIOHIDEventRef, CFOptio
 static FBIOHIDEventSystemClientRef (*fbIOHIDEventSystemClientCreate)(CFAllocatorRef);
 static void (*fbIOHIDEventSystemClientDispatchEvent)(FBIOHIDEventSystemClientRef, FBIOHIDEventRef);
 static void (*fbBKSHIDEventSetDigitizerInfo)(FBIOHIDEventRef, uint32_t, uint8_t, uint8_t, CFStringRef, CFTimeInterval, float);
+static void (*fbIOHIDEventSetSenderID)(FBIOHIDEventRef, uint64_t);
+static FBIOHIDEventSystemClientRef (*fbIOHIDEventSystemClientCreateWithType)(CFAllocatorRef, int, CFDictionaryRef);
 static FBIOHIDEventSystemClientRef fbHidClient = NULL;
+static BOOL fbHidTyped = NO;
+static uint32_t fbLastCtx = 0;
 
 @interface UIWindow (FBLiveTouchPrivate)
 - (uint32_t)_contextId;
@@ -76,11 +80,21 @@ static void FBEnsureHIDClient(void)
     fbIOHIDEventAppendEvent = (void *)dlsym(handle, "IOHIDEventAppendEvent");
     fbIOHIDEventSystemClientCreate = (void *)dlsym(handle, "IOHIDEventSystemClientCreate");
     fbIOHIDEventSystemClientDispatchEvent = (void *)dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
+    fbIOHIDEventSetSenderID = (void *)dlsym(handle, "IOHIDEventSetSenderID");
+    fbIOHIDEventSystemClientCreateWithType = (void *)dlsym(handle, "IOHIDEventSystemClientCreateWithType");
     void *bks = dlopen("/System/Library/PrivateFrameworks/BackBoardServices.framework/BackBoardServices", RTLD_NOW);
     if (NULL != bks) {
       fbBKSHIDEventSetDigitizerInfo = (void *)dlsym(bks, "BKSHIDEventSetDigitizerInfo");
     }
-    if (NULL != fbIOHIDEventSystemClientCreate) {
+    // Uu tien client type Monitor (1) — client mac dinh bi gioi han khi app
+    // chay background (runner), khien dispatch bi bo qua.
+    if (NULL != fbIOHIDEventSystemClientCreateWithType) {
+      fbHidClient = fbIOHIDEventSystemClientCreateWithType(kCFAllocatorDefault, 1, NULL);
+      if (NULL != fbHidClient) {
+        fbHidTyped = YES;
+      }
+    }
+    if (NULL == fbHidClient && NULL != fbIOHIDEventSystemClientCreate) {
       fbHidClient = fbIOHIDEventSystemClientCreate(kCFAllocatorDefault);
     }
   });
@@ -123,6 +137,9 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
     }
     CFRelease(finger);
   }
+  if (NULL != fbIOHIDEventSetSenderID) {
+    fbIOHIDEventSetSenderID(hand, 0x8000000000000000);
+  }
   // Gan event voi display context (BackBoardServices) — THIEU buoc nay event
   // bi he thong bo qua (theo WebKit HIDEventGenerator — ho drive device that).
   if (NULL != fbBKSHIDEventSetDigitizerInfo) {
@@ -131,9 +148,8 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
       w = UIApplication.sharedApplication.windows.firstObject;
     }
     uint32_t ctx = nil == w ? 0 : w._contextId;
-    if (ctx > 0) {
-      fbBKSHIDEventSetDigitizerInfo(hand, ctx, 0, 0, NULL, 0, 0);
-    }
+    fbLastCtx = ctx;
+    fbBKSHIDEventSetDigitizerInfo(hand, ctx, 0, 0, NULL, 0, 0);
   }
   fbIOHIDEventSystemClientDispatchEvent(fbHidClient, hand);
   CFRelease(hand);
@@ -776,6 +792,13 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
     return FBResponseWithStatus([FBCommandStatus unsupportedOperationErrorWithMessage:
       @"Failed to inject the HID touch event" traceback:nil]);
   }
+  return FBResponseWithObject(@{
+    @"ok": @(YES),
+    @"ctx": @(fbLastCtx),
+    @"typed": @(fbHidTyped),
+    @"bks": @(NULL != fbBKSHIDEventSetDigitizerInfo),
+    @"sender": @(NULL != fbIOHIDEventSetSenderID),
+  });
 #endif
   return FBResponseWithOK();
 }
