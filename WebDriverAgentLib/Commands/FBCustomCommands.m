@@ -32,6 +32,9 @@
 #import "XCUIElementQuery.h"
 #import "FBUnattachedAppLauncher.h"
 #import <dlfcn.h>
+#import "FBXCTestDaemonsProxy.h"
+#import "XCSynthesizedEventRecord.h"
+#import "XCPointerEventPath.h"
 #import <mach/mach_time.h>
 #if !TARGET_OS_WATCH
 #import <UIKit/UIKit.h>
@@ -105,68 +108,15 @@ static void FBEnsureHIDClient(void)
 // phase: 0 = down, 1 = move, 2 = up.
 static BOOL FBDispatchTouch(CGPoint point, int phase)
 {
-  FBEnsureHIDClient();
-  if (NULL == fbHidClient || NULL == fbIOHIDEventCreateDigitizerEvent
-      || NULL == fbIOHIDEventCreateDigitizerFingerEvent || NULL == fbIOHIDEventSystemClientDispatchEvent) {
-    return NO;
+  // XCTest synthesis (giong ban RT): record KHONG co liftUp = giu ngon tay.
+  XCPointerEventPath *path = [[XCPointerEventPath alloc] initForTouchAtPoint:point offset:0.0];
+  if (2 == phase) {
+    [path liftUpAtOffset:0.01];
   }
-  uint64_t abTime = mach_absolute_time();
-  BOOL touching = (2 != phase);
-  FBIOHIDEventRef hand = fbIOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, abTime, 3 /*hand*/, 0, 0,
-                                                          kFBDigitizerEventTouch, 0, 0, 0, 0, 0, 0, 0, true, 0);
-  if (NULL == hand) {
-    return NO;
-  }
-  if (NULL != fbIOHIDEventSetIntegerValue) {
-    fbIOHIDEventSetIntegerValue(hand, kFBDigitizerFieldIsDisplayIntegrated, 1);
-  }
-  CGFloat fx = point.x, fy = point.y;
-  if (fbHIDNorm) {
-    CGSize ss = UIScreen.mainScreen.bounds.size;
-    if (ss.width > 0 && ss.height > 0) { fx = point.x / ss.width; fy = point.y / ss.height; }
-  }
-  uint32_t eventMask = (1 == phase) ? kFBDigitizerEventPosition : (kFBDigitizerEventRange | kFBDigitizerEventTouch);
-  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, abTime, 1 /*index*/, 2 /*identity*/, eventMask,
-                                                                  fx, fy, 0, 0, 0, touching, touching, 0);
-  if (NULL != finger) {
-    if (NULL != fbIOHIDEventSetIntegerValue) {
-      fbIOHIDEventSetIntegerValue(finger, kFBDigitizerFieldIsDisplayIntegrated, 1);
-    }
-    if (NULL != fbIOHIDEventAppendEvent) {
-      fbIOHIDEventAppendEvent(hand, finger, 0);
-    }
-    CFRelease(finger);
-  }
-  if (NULL != fbIOHIDEventSetSenderID) {
-    fbIOHIDEventSetSenderID(hand, 0x8000000000000000);
-  }
-  // Gan event voi display context (BackBoardServices) — thieu contextID hop le
-  // thi event bi bo qua. Runner background co the khong co keyWindow →
-  // tao window an 1x1 tren main thread de lay _contextId.
-  if (NULL != fbBKSHIDEventSetDigitizerInfo) {
-    __block uint32_t ctx = 0;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-      UIWindow *w = UIApplication.sharedApplication.keyWindow;
-      if (nil == w) {
-        w = UIApplication.sharedApplication.windows.firstObject;
-      }
-      if (nil == w) {
-        static UIWindow *fbHidWindow = nil;
-        if (nil == fbHidWindow) {
-          fbHidWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
-          fbHidWindow.alpha = 0.0;
-          [fbHidWindow makeKeyAndVisible];
-        }
-        w = fbHidWindow;
-      }
-      ctx = nil == w ? 0 : w._contextId;
-    });
-    fbLastCtx = ctx;
-    fbBKSHIDEventSetDigitizerInfo(hand, ctx, 0, 0, NULL, 0, 0);
-  }
-  fbIOHIDEventSystemClientDispatchEvent(fbHidClient, hand);
-  CFRelease(hand);
-  return YES;
+  XCSynthesizedEventRecord *event = [[XCSynthesizedEventRecord alloc] initWithName:@"farm-live-touch" interfaceOrientation:UIInterfaceOrientationPortrait];
+  [event addPointerEventPath:path];
+  NSError *error = nil;
+  return [FBXCTestDaemonsProxy synthesizeEventWithRecord:event error:&error];
 }
 #endif
 
