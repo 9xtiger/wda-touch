@@ -140,14 +140,27 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
   if (NULL != fbIOHIDEventSetSenderID) {
     fbIOHIDEventSetSenderID(hand, 0x8000000000000000);
   }
-  // Gan event voi display context (BackBoardServices) — THIEU buoc nay event
-  // bi he thong bo qua (theo WebKit HIDEventGenerator — ho drive device that).
+  // Gan event voi display context (BackBoardServices) — thieu contextID hop le
+  // thi event bi bo qua. Runner background co the khong co keyWindow →
+  // tao window an 1x1 tren main thread de lay _contextId.
   if (NULL != fbBKSHIDEventSetDigitizerInfo) {
-    UIWindow *w = UIApplication.sharedApplication.keyWindow;
-    if (nil == w) {
-      w = UIApplication.sharedApplication.windows.firstObject;
-    }
-    uint32_t ctx = nil == w ? 0 : w._contextId;
+    __block uint32_t ctx = 0;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      UIWindow *w = UIApplication.sharedApplication.keyWindow;
+      if (nil == w) {
+        w = UIApplication.sharedApplication.windows.firstObject;
+      }
+      if (nil == w) {
+        static UIWindow *fbHidWindow = nil;
+        if (nil == fbHidWindow) {
+          fbHidWindow = [[UIWindow alloc] initWithFrame:CGRectMake(0, 0, 1, 1)];
+          fbHidWindow.alpha = 0.0;
+          [fbHidWindow makeKeyAndVisible];
+        }
+        w = fbHidWindow;
+      }
+      ctx = nil == w ? 0 : w._contextId;
+    });
     fbLastCtx = ctx;
     fbBKSHIDEventSetDigitizerInfo(hand, ctx, 0, 0, NULL, 0, 0);
   }
