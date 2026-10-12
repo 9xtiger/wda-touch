@@ -36,6 +36,88 @@
 #import "XCUIElementQuery.h"
 #import "XCUIScreen.h"
 #import "FBUnattachedAppLauncher.h"
+#import <dlfcn.h>
+#import <mach/mach_time.h>
+#if !TARGET_OS_WATCH
+#import <UIKit/UIKit.h>
+#endif
+
+#pragma mark - Live touch (IOHIDEvent digitizer injection)
+
+#if !TARGET_OS_WATCH
+typedef struct __IOHIDEvent *FBIOHIDEventRef;
+typedef struct __IOHIDEventSystemClient *FBIOHIDEventSystemClientRef;
+
+static FBIOHIDEventRef (*fbIOHIDEventCreateDigitizerEvent)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, bool, bool, CFOptionFlags);
+static FBIOHIDEventRef (*fbIOHIDEventCreateDigitizerFingerEvent)(CFAllocatorRef, uint64_t, uint32_t, uint32_t, uint32_t, CGFloat, CGFloat, CGFloat, CGFloat, CGFloat, bool, bool, CFOptionFlags);
+static void (*fbIOHIDEventSetIntegerValue)(FBIOHIDEventRef, uint32_t, CFIndex);
+static void (*fbIOHIDEventAppendEvent)(FBIOHIDEventRef, FBIOHIDEventRef, CFOptionFlags);
+static FBIOHIDEventSystemClientRef (*fbIOHIDEventSystemClientCreate)(CFAllocatorRef);
+static void (*fbIOHIDEventSystemClientDispatchEvent)(FBIOHIDEventSystemClientRef, FBIOHIDEventRef);
+static FBIOHIDEventSystemClientRef fbHidClient = NULL;
+
+static const uint32_t kFBDigitizerFieldIsDisplayIntegrated = 0x000B0019;
+static const uint32_t kFBDigitizerEventPosition = 0x00000004;
+static const uint32_t kFBDigitizerEventStart = 0x00000100;
+
+static void FBEnsureHIDClient(void)
+{
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    void *handle = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW);
+    if (NULL == handle) {
+      return;
+    }
+    fbIOHIDEventCreateDigitizerEvent = (void *)dlsym(handle, "IOHIDEventCreateDigitizerEvent");
+    fbIOHIDEventCreateDigitizerFingerEvent = (void *)dlsym(handle, "IOHIDEventCreateDigitizerFingerEvent");
+    fbIOHIDEventSetIntegerValue = (void *)dlsym(handle, "IOHIDEventSetIntegerValue");
+    fbIOHIDEventAppendEvent = (void *)dlsym(handle, "IOHIDEventAppendEvent");
+    fbIOHIDEventSystemClientCreate = (void *)dlsym(handle, "IOHIDEventSystemClientCreate");
+    fbIOHIDEventSystemClientDispatchEvent = (void *)dlsym(handle, "IOHIDEventSystemClientDispatchEvent");
+    if (NULL != fbIOHIDEventSystemClientCreate) {
+      fbHidClient = fbIOHIDEventSystemClientCreate(kCFAllocatorDefault);
+    }
+  });
+}
+
+// phase: 0 = down, 1 = move, 2 = up. Toạ độ là points, tự chuẩn hoá về 0..1.
+static BOOL FBDispatchTouch(CGPoint point, int phase)
+{
+  FBEnsureHIDClient();
+  if (NULL == fbHidClient || NULL == fbIOHIDEventCreateDigitizerEvent
+      || NULL == fbIOHIDEventCreateDigitizerFingerEvent || NULL == fbIOHIDEventSystemClientDispatchEvent) {
+    return NO;
+  }
+  CGSize screenSize = UIScreen.mainScreen.bounds.size;
+  if (screenSize.width <= 0 || screenSize.height <= 0) {
+    return NO;
+  }
+  CGFloat nx = MAX(0.0, MIN(1.0, point.x / screenSize.width));
+  CGFloat ny = MAX(0.0, MIN(1.0, point.y / screenSize.height));
+  uint64_t ts = mach_absolute_time();
+  BOOL isDown = (2 != phase);
+  uint32_t mask = kFBDigitizerEventPosition | (0 == phase ? kFBDigitizerEventStart : 0);
+  FBIOHIDEventRef hand = fbIOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, ts, 3 /*hand*/, 0, 0, mask, 0,
+                                                          nx, ny, 0, 0, 0, isDown, isDown, 0);
+  if (NULL == hand) {
+    return NO;
+  }
+  if (NULL != fbIOHIDEventSetIntegerValue) {
+    fbIOHIDEventSetIntegerValue(hand, kFBDigitizerFieldIsDisplayIntegrated, 1);
+  }
+  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, ts, 0, 2 /*fingerIndex*/, mask,
+                                                                  nx, ny, 0, 0, 0, isDown, isDown, 0);
+  if (NULL != finger) {
+    if (NULL != fbIOHIDEventAppendEvent) {
+      fbIOHIDEventAppendEvent(hand, finger, 0);
+    }
+    CFRelease(finger);
+  }
+  fbIOHIDEventSystemClientDispatchEvent(fbHidClient, hand);
+  CFRelease(hand);
+  return YES;
+}
+#endif
 
 @implementation FBCustomCommands
 
@@ -45,6 +127,9 @@
   @[
     [[FBRoute POST:@"/timeouts"] respondWithTarget:self action:@selector(handleTimeouts:)],
     [[FBRoute POST:@"/wda/homescreen"].withoutSession respondWithTarget:self action:@selector(handleHomescreenCommand:)],
+    [[FBRoute POST:@"/wda/touchDown"].withoutSession respondWithTarget:self action:@selector(handleLiveTouchDown:)],
+    [[FBRoute POST:@"/wda/touchMove"].withoutSession respondWithTarget:self action:@selector(handleLiveTouchMove:)],
+    [[FBRoute POST:@"/wda/touchUp"].withoutSession respondWithTarget:self action:@selector(handleLiveTouchUp:)],
     [[FBRoute POST:@"/wda/deactivateApp"] respondWithTarget:self action:@selector(handleDeactivateAppCommand:)],
     [[FBRoute POST:@"/wda/keyboard/dismiss"] respondWithTarget:self action:@selector(handleDismissKeyboardCommand:)],
     [[FBRoute POST:@"/wda/lock"].withoutSession respondWithTarget:self action:@selector(handleLock:)],
@@ -842,6 +927,40 @@
   if (![XCUIDevice.sharedDevice fb_setSimulatedHingeAngle:[angle doubleValue] error:&error]) {
     return FBResponseWithUnknownError(error);
   }
+  return FBResponseWithOK();
+}
+
+#pragma mark - Live touch handlers
+
++ (id<FBResponsePayload>)handleLiveTouchDown:(FBRouteRequest *)request
+{
+  return [self fb_handleLiveTouch:request phase:0];
+}
+
++ (id<FBResponsePayload>)handleLiveTouchMove:(FBRouteRequest *)request
+{
+  return [self fb_handleLiveTouch:request phase:1];
+}
+
++ (id<FBResponsePayload>)handleLiveTouchUp:(FBRouteRequest *)request
+{
+  return [self fb_handleLiveTouch:request phase:2];
+}
+
++ (id<FBResponsePayload>)fb_handleLiveTouch:(FBRouteRequest *)request phase:(int)phase
+{
+  NSNumber *x = request.arguments[@"x"];
+  NSNumber *y = request.arguments[@"y"];
+  if (![x isKindOfClass:NSNumber.class] || ![y isKindOfClass:NSNumber.class]) {
+    return FBResponseWithStatus([FBCommandStatus invalidArgumentErrorWithMessage:
+      @"Both 'x' and 'y' must be provided as numbers" traceback:nil]);
+  }
+#if !TARGET_OS_WATCH
+  if (!FBDispatchTouch(CGPointMake([x doubleValue], [y doubleValue]), phase)) {
+    return FBResponseWithStatus([FBCommandStatus unsupportedOperationErrorWithMessage:
+      @"Failed to inject the HID touch event" traceback:nil]);
+  }
+#endif
   return FBResponseWithOK();
 }
 
