@@ -52,8 +52,10 @@ static void (*fbIOHIDEventSystemClientDispatchEvent)(FBIOHIDEventSystemClientRef
 static FBIOHIDEventSystemClientRef fbHidClient = NULL;
 
 static const uint32_t kFBDigitizerFieldIsDisplayIntegrated = 0x000B0019;
+static const uint32_t kFBDigitizerEventRange = 0x00000001;
+static const uint32_t kFBDigitizerEventTouch = 0x00000002;
 static const uint32_t kFBDigitizerEventPosition = 0x00000004;
-static const uint32_t kFBDigitizerEventStart = 0x00000100;
+static BOOL fbHIDNorm = NO;
 
 static void FBEnsureHIDClient(void)
 {
@@ -75,7 +77,9 @@ static void FBEnsureHIDClient(void)
   });
 }
 
-// phase: 0 = down, 1 = move, 2 = up. Toạ độ là points, tự chuẩn hoá về 0..1.
+// Theo code chuan KIF (chay that tren device): hand mask=Touch; finger
+// down/up mask=Range|Touch, move mask=Position; toa do POINTS (norm=1 -> 0..1).
+// phase: 0 = down, 1 = move, 2 = up.
 static BOOL FBDispatchTouch(CGPoint point, int phase)
 {
   FBEnsureHIDClient();
@@ -83,26 +87,28 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
       || NULL == fbIOHIDEventCreateDigitizerFingerEvent || NULL == fbIOHIDEventSystemClientDispatchEvent) {
     return NO;
   }
-  CGSize screenSize = UIScreen.mainScreen.bounds.size;
-  if (screenSize.width <= 0 || screenSize.height <= 0) {
-    return NO;
-  }
-  CGFloat nx = MAX(0.0, MIN(1.0, point.x / screenSize.width));
-  CGFloat ny = MAX(0.0, MIN(1.0, point.y / screenSize.height));
-  uint64_t ts = mach_absolute_time();
-  BOOL isDown = (2 != phase);
-  uint32_t mask = kFBDigitizerEventPosition | (0 == phase ? kFBDigitizerEventStart : 0);
-  FBIOHIDEventRef hand = fbIOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, ts, 3 /*hand*/, 0, 0, mask, 0,
-                                                          nx, ny, 0, 0, 0, isDown, isDown, 0);
+  uint64_t abTime = mach_absolute_time();
+  BOOL touching = (2 != phase);
+  FBIOHIDEventRef hand = fbIOHIDEventCreateDigitizerEvent(kCFAllocatorDefault, abTime, 3 /*hand*/, 0, 0,
+                                                          kFBDigitizerEventTouch, 0, 0, 0, 0, 0, 0, 0, true, 0);
   if (NULL == hand) {
     return NO;
   }
   if (NULL != fbIOHIDEventSetIntegerValue) {
     fbIOHIDEventSetIntegerValue(hand, kFBDigitizerFieldIsDisplayIntegrated, 1);
   }
-  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, ts, 0, 2 /*fingerIndex*/, mask,
-                                                                  nx, ny, 0, 0, 0, isDown, isDown, 0);
+  CGFloat fx = point.x, fy = point.y;
+  if (fbHIDNorm) {
+    CGSize ss = UIScreen.mainScreen.bounds.size;
+    if (ss.width > 0 && ss.height > 0) { fx = point.x / ss.width; fy = point.y / ss.height; }
+  }
+  uint32_t eventMask = (1 == phase) ? kFBDigitizerEventPosition : (kFBDigitizerEventRange | kFBDigitizerEventTouch);
+  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, abTime, 1 /*index*/, 2 /*identity*/, eventMask,
+                                                                  fx, fy, 0, 0, 0, touching, touching, 0);
   if (NULL != finger) {
+    if (NULL != fbIOHIDEventSetIntegerValue) {
+      fbIOHIDEventSetIntegerValue(finger, kFBDigitizerFieldIsDisplayIntegrated, 1);
+    }
     if (NULL != fbIOHIDEventAppendEvent) {
       fbIOHIDEventAppendEvent(hand, finger, 0);
     }
@@ -741,6 +747,10 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
       @"Both 'x' and 'y' must be provided as numbers" traceback:nil]);
   }
 #if !TARGET_OS_WATCH
+  NSNumber *norm = request.arguments[@"norm"];
+  if ([norm isKindOfClass:NSNumber.class]) {
+    fbHIDNorm = [norm boolValue];
+  }
   if (!FBDispatchTouch(CGPointMake([x doubleValue], [y doubleValue]), phase)) {
     return FBResponseWithStatus([FBCommandStatus unsupportedOperationErrorWithMessage:
       @"Failed to inject the HID touch event" traceback:nil]);
