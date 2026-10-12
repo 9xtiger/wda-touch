@@ -105,8 +105,8 @@ static BOOL FBDispatchTouch(CGPoint point, int phase)
   if (NULL != fbIOHIDEventSetIntegerValue) {
     fbIOHIDEventSetIntegerValue(hand, kFBDigitizerFieldIsDisplayIntegrated, 1);
   }
-  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, ts, 0, 2 /*fingerIndex*/, 1,
-                                                                  mask, nx, ny, 0, 0, 0, isDown, isDown, 0);
+  FBIOHIDEventRef finger = fbIOHIDEventCreateDigitizerFingerEvent(kCFAllocatorDefault, ts, 0, 2 /*fingerIndex*/, mask,
+                                                                  nx, ny, 0, 0, 0, isDown, isDown, 0);
   if (NULL != finger) {
     if (NULL != fbIOHIDEventAppendEvent) {
       fbIOHIDEventAppendEvent(hand, finger, 0);
